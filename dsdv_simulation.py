@@ -10,56 +10,61 @@ class RoutingTable(object):
         self.node = node
         self.routes_dict = dict()
         self.seq_number = random.randint(0,100)*2
-        self.routes_dict[self.node.node_id] = [self.node.node_id, 0, self.seq_number, int(time.time())]
+        self.routes_dict[self.node.node_id] = [self.node.node_id, 0, self.seq_number, 0]
 
     def compare_routes(self,my_route,external_route):
-        metric1 = my_route[0]
-        seq_num1 = my_route[1]
-        metric2 = external_route[0]+1
-        seq_num2 = external_route[1]
+        next_hop1 = my_route[0]
+        metric1 = my_route[1]
+        seq_num1 = my_route[2]
+        next_hop2 = external_route[0]
+        metric2 = external_route[1]
+        seq_num2 = external_route[2]
 
-        if seq_num1 == seq_num2:   # equal freshness
-            if metric1 <= metric2: # shorter route is my_route
-                return 0
+        if seq_num2 < seq_num1:
+            return "no_news"
+
+        if seq_num2 == seq_num1:
+            if metric2 < metric1:
+                return "update_table_broadcast"
             else:
-                return 1
+                return "no_news"
 
-        if seq_num1 > seq_num2:    # my_route is fresher
-            return 0
+        if not metric2 == metric1 or not next_hop1 == next_hop2:
+            return "update_table_broadcast"
         else:
-            return 1
+            return "update_table"
 
 
-    def update(self, routing_table_update_string):
-        updated = False
-        other_routes = self.recv_string_decode(routing_table_update_string)
-        for k in other_routes.keys():
+    def update(self, neighbour_routing_table,updt_time):
+        broadcast = False
+        for k in neighbour_routing_table.keys():
             k_int = int(k)
-            other_route = other_routes[k]
-            other_entry_inf = (other_route[1],other_route[2])
+            other_route = neighbour_routing_table[k]
+            other_entry_inf = (other_route[0],other_route[1],other_route[2])
             if k_int in self.routes_dict.keys():
                 my_route = self.routes_dict[k_int]
-                my_entry_inf = (my_route[1],my_route[2])
-                better_route = self.compare_routes(my_entry_inf,other_entry_inf)
-                if better_route == 1:
-                    self.routes_dict[k_int] = [other_route[0],other_route[1]+1,other_route[2],int(time.time())]
-                    updated = True
+                my_entry_inf = (my_route[0],my_route[1],my_route[2])
+                route_comparison = self.compare_routes(my_entry_inf,other_entry_inf)
+                if "update_table" in route_comparison:
+                    self.routes_dict[k_int] = [other_route[0],other_route[1],other_route[2],updt_time]
+                if "broadcast" in route_comparison:
+                    broadcast = route_comparison
             else:
-                self.routes_dict[k_int] = [other_route[0],other_route[1]+1,other_route[2],int(time.time())]
-                updated = True
+                self.routes_dict[k_int] = [other_route[0],other_route[1],other_route[2],updt_time]
+                broadcast = True
 
-        return updated
+        return broadcast
 
 
     def recv_string_decode(self, routes_string):
         return json.loads(routes_string)
 
-    def send_string_encode(self):
+    def get_send_dict(self):
         send_dict = dict()
         for k in self.routes_dict.keys():
             next_hop,metric,dst_seq_num,install_time = self.routes_dict[k]
-            send_dict[k] = [self.node.node_id, metric, dst_seq_num]
-        return json.dumps(send_dict)
+            send_dict[k] = [self.node.node_id, metric+1, dst_seq_num]
+        return send_dict
 
     def to_string(self):
 #        print(self.routes_dict)
@@ -72,6 +77,32 @@ class RoutingTable(object):
             out += "|{:<6}|{:<7}|{:<6}|{:<5}|{:<5}|".format(k,next_hop,metric,dst_seq_num,install_time%100000)
         return out
 
+    def increase_seq_number(self):
+        self.seq_number += 2
+        self.routes_dict[self.node.node_id][2] = self.seq_number
+
+#    def remove_stale_routes(self,threshold_time):
+#        time_now = int(time.time())
+#        for k in self.routes_dict.keys():
+#            if time_now-self.routes_dict[k][3] > threshold_time:
+#                self.routes_dict[k][2] += 1
+#                self.routes_dict[k][1] = 1000000
+
+    def set_lost_neighbours(self,lost_neighbours):
+        for lost_neighbour in lost_neighbours:
+            if self.routes_dict[lost_neighbour][1] < 100000:
+                self.routes_dict[lost_neighbour][2] += 1
+                self.routes_dict[lost_neighbour][1] = 100000
+            for k in self.routes_dict.keys():
+                next_hop = self.routes_dict[k][0]
+                if next_hop == lost_neighbour:
+                    if self.routes_dict[k][1] < 100000:
+                        self.routes_dict[k][2] += 1
+                        self.routes_dict[k][1] = 100000
+
+
+
+
 class Node(object):
     def __init__(self, simulation_canvas, width, cor_x, cor_y, tx_range, node_id):
         self.simulation_canvas = simulation_canvas
@@ -82,18 +113,20 @@ class Node(object):
         self.node_id = node_id
 
         self.edges = []
+        self.neighbours = dict()
 
         self.routing_table = RoutingTable(self)
 
-#        self.periodic_update_range = (20,30) # up to 1 second
-#        self.periodic_update_range = (2,3) # using iteration_step-button
-        self.periodic_update_range = (10,20) # using iteration_step-button
+#        self.periodic_update_range = (10,20) # using iteration_step-button
+        self.periodic_update_range = (0,5)
+        self.periodic_update_delay = 5
         self.reset_periodic_update_counter()
 
         self.colorised_counter = -1
         self.fill_colour = "blue"
 
         self.draw_entity(self.cor_x,self.cor_y)
+
 
     def remove_entity(self):
         self.simulation_canvas.canvas.delete(self.entity)
@@ -103,22 +136,42 @@ class Node(object):
         self.entity = self.simulation_canvas.canvas.create_oval(cor_x-self.width/2,cor_y-self.width/2,cor_x+self.width/2,cor_y+self.width/2, fill="cyan")
         self.entity_text = self.simulation_canvas.canvas.create_text(cor_x,cor_y,text=str(self.node_id))
 
+#    def redraw_entity(self,cor_x,cor_y):
+#        self.remove_entity()
+#        self.draw_entity(cor_x,cor_y)
+#        for edge in self.edges:
+#            edge.redraw_entity()
+
     def redraw_entity(self,cor_x,cor_y):
-        self.remove_entity()
-        self.draw_entity(cor_x,cor_y)
+        self.cor_x,self.cor_y = cor_x,cor_y
+
+        x0,x1 = cor_x-self.width/2,cor_x+self.width/2
+        y0,y1 = cor_y-self.width/2,cor_y+self.width/2
+
+        self.simulation_canvas.canvas.coords(self.entity,x0,y0,x1,y1)
+        self.simulation_canvas.canvas.coords(self.entity_text,cor_x,cor_y)
+        tmp_edges = []
         for edge in self.edges:
-            edge.redraw_entity()
+            tmp_edges.append(edge.remove_entity())
+        for edge in tmp_edges:
+            self.simulation_canvas.edges.remove(edge)
 
     def reset_periodic_update_counter(self):
-        self.periodic_update_counter = random.randint(*self.periodic_update_range)
+        self.periodic_update_counter = self.periodic_update_delay + random.randint(*self.periodic_update_range)
 
     def get_distance(self, posxy):
         x,y = posxy
         return math.hypot(self.cor_x-x,self.cor_y-y)
 
     def update_step(self):
+        self.check_neighbours()
+
         if self.periodic_update_counter == 0:
-            self.send(self.routing_table.send_string_encode())
+            packet = dict()
+            packet["src_id"] = self.node_id
+            packet["routing_table"] = self.routing_table.get_send_dict()
+            packet_string = json.dumps(packet)
+            self.send(packet_string)
             self.reset_periodic_update_counter()
         self.periodic_update_counter -= 1
 
@@ -127,21 +180,35 @@ class Node(object):
                 self.simulation_canvas.canvas.itemconfigure(self.entity, fill=self.fill_colour)
             self.colorised_counter -= 1
 
-
-
-    def routing_table_access(self, received_table_string):
-        return self.routing_table.update(received_table_string)
+    def routing_table_access(self, routing_table):
+        return self.routing_table.update(routing_table,self.simulation_canvas.tick)
 
     def send(self,message):
+        self.routing_table.increase_seq_number()
         self.simulation_canvas.medium_access(self,message,self.tx_range)
 
     def receive(self,message):
-        routing_table_change = self.routing_table_access(message)
-        self.periodic_update_counter = 0 if routing_table_change else self.periodic_update_counter
+        packet = json.loads(message)
+        src_node = packet["src_id"]
+        self.neighbours[src_node] = self.simulation_canvas.tick
+        routing_table = packet["routing_table"]
+
+        broadcast = self.routing_table_access(routing_table)
+
+        if broadcast:
+            self.periodic_update_counter = 0
 
     def colorise(self,fill):
         self.simulation_canvas.canvas.itemconfigure(self.entity,fill=fill)
         self.colorised_counter = 1
+
+    def check_neighbours(self):
+        time_now = self.simulation_canvas.tick
+        lost_neighbours = []
+        for k in self.neighbours.keys():
+            if time_now-self.neighbours[k] > 2.5*self.periodic_update_delay:
+                lost_neighbours.append(k)
+        self.routing_table.set_lost_neighbours(lost_neighbours)
 
 
 class Edge(object):
@@ -160,9 +227,12 @@ class Edge(object):
         self.draw_entity()
 
     def remove_entity(self):
-        self.simulation_canvas.canvas.delete(self.entity)
+        self.canvas.delete(self.entity)
+        self.n1.edges.remove(self)
+        self.n2.edges.remove(self)
+        return self
 
-    def draw_entity(self):
+    def get_coords(self):
         x1,y1 = self.n1.cor_x,self.n1.cor_y
         x2,y2 = self.n2.cor_x,self.n2.cor_y
 
@@ -176,11 +246,20 @@ class Edge(object):
         x2 = end_ratio*x2+(1-end_ratio)*x1
         y2 = end_ratio*y2+(1-end_ratio)*y1
 
+        return x1,y1,x2,y2
+
+    def draw_entity(self):
+        x1,y1,x2,y2 = self.get_coords()
         self.entity = self.canvas.create_line(x1,y1, x2,y2, width=2, fill=self.fill_colour)
 
-    def redraw_entity(self):
-        self.remove_entity()
-        self.draw_entity()
+#    def redraw_entity(self):
+#        self.remove_entity()
+#        self.draw_entity()
+
+#    def redraw_entity(self):
+#        x1,y1,x2,y2 = self.get_coords()
+#        self.canvas.coords(self.entity,x1,y1,x2,y2)
+
 
     def colorise(self,fill):
         self.canvas.itemconfigure(self.entity,fill=fill)
@@ -244,32 +323,41 @@ class SimulationCanvas(threading.Thread):
         self.node_tx_range = 100
         self.node_min_distance = 60
         self.node_at_most_one_max_distance = 100
-        self.update_rate = 10 #fps
+#        self.update_rate = 4 #fps
+        self.update_rate = 1
+
+        self.node_moving = False
 
         self.canvas.bind("<Button-1>", self.mouse_click_callback_left)
         self.canvas.bind("<Button-3>", self.mouse_click_callback_right)
+        self.canvas.bind("<B1-Motion>", self.mouse_motion_callback)
+        self.canvas.bind("<ButtonRelease-1>", self.mouse_release_callback_left)
 
         self.reset_network()
-        self.time_step = 0
-        self.update_step_type = 0
 
     def reset_network(self):
         self.canvas.delete("all")
         self.nodes = []
         self.edges = []
         self.medium_transmission_buffer = []
-        self.time_step = 0
+        self.tick = 0
+        self.update_step_type = 0
+        self.simulation_on = False
 
     def initialise_network(self, number_nodes):
         self.reset_network()
         self.number_nodes = number_nodes
-        self.time_step_text = self.canvas.create_text(20,20, anchor=tk.NW, text="timestep: {:>3}".format(self.time_step))
+        self.tick_text = self.canvas.create_text(20,20, anchor=tk.NW, text="timestep: {:>3}".format(self.tick))
 
         self.create_random_nodes()
         for node in self.nodes:
             self.canvas.itemconfigure(node.entity,fill="blue")
 
         self.connect_nodes()
+
+    def set_periodic_update_delay_for_nodes(self,delay):
+        for node in self.nodes:
+            node.periodic_update_delay = delay
 
     def add_node(self,cor_x,cor_y,node_id):
         new_node = Node(self, self.node_width, cor_x, cor_y, self.node_tx_range,node_id)
@@ -345,7 +433,7 @@ class SimulationCanvas(threading.Thread):
         self.medium_transmission_buffer = []
 
     def update_step(self):
-        self.canvas.itemconfigure(self.time_step_text,text="timestep: {:>3}".format(self.time_step))
+        self.canvas.itemconfigure(self.tick_text,text="timestep: {:>3}".format(self.tick))
 
         if self.update_step_type == 0:
             for node in self.nodes:
@@ -356,19 +444,53 @@ class SimulationCanvas(threading.Thread):
             self.update_medium_transmissions()
             for edge in self.edges:
                 edge.update_step()
-            self.time_step += 1
+            self.tick += 1
             self.update_step_type = 0
 
+    def mouse_click_callback_right(self, event):
+        for n in self.nodes:
+            clickdist = n.get_distance((event.x,event.y))
+            if clickdist < self.node_width/2:
+                pass
+
+    def mouse_click_callback_left(self, event):
+        to_remove = []
+        for n in self.nodes:
+            clickdist = n.get_distance((event.x,event.y))
+            if clickdist <= n.width/2:
+                self.simulation.label_routing_table_string_var.set(n.routing_table.to_string())
+
+    def mouse_motion_callback(self, event):
+        for node in self.nodes:
+            dist = node.get_distance((event.x,event.y))
+            if dist <= node.width/2:
+                node.redraw_entity(event.x,event.y)
+                self.node_moving = True
+
+    def mouse_release_callback_left(self, event):
+        if self.node_moving:
+            for node in self.nodes:
+                dist = node.get_distance((event.x,event.y))
+                if dist <= node.width/2:
+                    for n2 in [n for n in self.nodes if not n == node]:
+                        dist = node.get_distance((n2.cor_x,n2.cor_y))
+                        if dist <= self.node_at_most_one_max_distance:
+                            new_edge = Edge(self.canvas, node,n2)
+                            self.edges.append(new_edge)
+                    self.node_moving = False
 
 
     def run(self):
         while True:
             loop_start_time = time.time()
 
+            if self.simulation_on:
+                self.update_step()
+
             self.canvas.update()
 
             loop_end_time = time.time()
-            sleep_time = max(0, (1/self.update_rate)-(loop_end_time-loop_start_time))
+            sleep_time = max(0, (1/self.update_rate/2)-(loop_end_time-loop_start_time))
 
             time.sleep(sleep_time)
 
@@ -393,14 +515,23 @@ class Simulation(object):
         self.button_generate_network = tk.Button(self.left_frame, text="Generate Network", bg="#00F0FF", width=20, font="Monospace", command=self.button_generate_network_callback)
         self.button_generate_network.grid(row=2, column=0, padx=5, pady=5)
 
+        self.slider_fps = tk.Scale(self.left_frame, from_=1, to=50, resolution=1, orient=tk.HORIZONTAL, length=160, command=self.slider_fps_callback)
+        self.slider_fps.grid(row=3, column=0, padx=5, pady=5)
+
+        self.slider_node_periodic_update_rate = tk.Scale(self.left_frame, from_=5, to=200, resolution=1, orient=tk.HORIZONTAL, length=160, command=self.slider_node_periodic_update_rate_callback)
+        self.slider_node_periodic_update_rate.grid(row=4, column=0, padx=5, pady=5)
+
         self.button_iteration_step = tk.Button(self.left_frame, text="Iteration Step", bg="#00F0FF", width=20, font="Monospace", command=self.button_iteration_step_callback)
-        self.button_iteration_step.grid(row=3, column=0, padx=5, pady=5)
+        self.button_iteration_step.grid(row=5, column=0, padx=5, pady=5)
+
+        self.button_toggle_simulation = tk.Button(self.left_frame, text="Toggle Simulation", bg="#00F0FF", width=20, font="Monospace", command=self.button_toggle_simulation_callback)
+        self.button_toggle_simulation.grid(row=6, column=0, padx=5, pady=5)
 
         self.label_routing_table_string_var = tk.StringVar()
         self.label_routing_table_string_var.set("##### Routing Table for #{:<3} ######\n|DestID|NextHop|Metric|SeqNo|InstT|".format(""))
 
         self.label_routing_table = tk.Label(self.left_frame, textvariable=self.label_routing_table_string_var, font="Monospace", bg="#F5F5F5")
-        self.label_routing_table.grid(row=4, column=0, padx=5, pady=5)
+        self.label_routing_table.grid(row=7, column=0, padx=5, pady=5)
 
         self.simulation_canvas = SimulationCanvas(self, self.width-self.panel_width,self.height)
         self.simulation_canvas.start()
@@ -415,7 +546,20 @@ class Simulation(object):
     def button_iteration_step_callback(self):
         self.simulation_canvas.update_step()
 
+    def button_toggle_simulation_callback(self):
+        self.simulation_canvas.simulation_on = not self.simulation_canvas.simulation_on
+
+    def slider_fps_callback(self,event):
+        slider_value = int(event)
+        self.simulation_canvas.update_rate = slider_value
+
+    def slider_node_periodic_update_rate_callback(self,event):
+        slider_value = int(event)
+        self.simulation_canvas.set_periodic_update_delay_for_nodes(slider_value)
+
+
 
 if __name__ == "__main__":
 
     simulation = Simulation(1500,800)
+#    simulation = Simulation(800,800)
